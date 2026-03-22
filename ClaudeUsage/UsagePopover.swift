@@ -2,6 +2,7 @@ import SwiftUI
 
 struct UsagePopover: View {
     @ObservedObject var viewModel: UsageViewModel
+    @AppStorage("appearance") private var isDark = true
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,16 +55,54 @@ struct UsagePopover: View {
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.gold)
             }
+            Button(action: { isDark.toggle() }) {
+                Image(systemName: isDark ? "sun.max" : "moon")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+
+            refreshButton
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
+                .animation(.easeInOut(duration: 0.2), value: viewModel.refreshState)
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
+    }
+
+    @ViewBuilder
+    private var refreshButton: some View {
+        switch viewModel.refreshState {
+        case .idle:
             Button(action: { viewModel.fetchUsage(force: true) }) {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textMuted)
             }
             .buttonStyle(.borderless)
+
+        case .refreshing:
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.6)
+                .frame(width: 16, height: 16)
+
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.green)
+                .transition(.opacity)
+
+        case .failed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.coral)
+                .transition(.opacity)
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 14)
-        .padding(.bottom, 12)
     }
 
     private var tabPicker: some View {
@@ -95,7 +134,7 @@ struct UsagePopover: View {
                                tip: "Rolling 5-hour burst window")
                 }
                 if let weekly = usage.sevenDay {
-                    usageMeter("All models", weekly.resetTimeFormatted, weekly.utilization, Theme.slate,
+                    usageMeter("All models", weekly.resetTimeFormatted, weekly.utilization, Theme.steel,
                                tip: "Combined usage, rolling 7 days")
                 }
                 if let sonnet = usage.sevenDaySonnet {
@@ -206,32 +245,13 @@ struct UsagePopover: View {
                         .padding(.horizontal, 16)
 
                     ForEach(Array(week.days.enumerated()), id: \.element.id) { _, day in
-                        HStack(spacing: 8) {
-                            Text(day.weekday)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(Theme.textSecondary)
-                                .frame(width: 32, alignment: .leading)
-
-                            GeometryReader { geo in
-                                let ratio = week.maxDailyMessages > 0
-                                    ? CGFloat(day.messageCount) / CGFloat(week.maxDailyMessages) : 0
-                                RoundedRectangle(cornerRadius: Theme.barRadius)
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [Theme.purple.opacity(0.5), Theme.purple.opacity(0.7)],
-                                            startPoint: .leading, endPoint: .trailing
-                                        )
-                                    )
-                                    .frame(width: max(4, geo.size.width * ratio))
-                            }
-                            .frame(height: 14)
-
-                            Text(formatNumber(day.messageCount))
-                                .font(.system(size: 12, weight: .medium, design: .monospaced))
-                                .foregroundStyle(Theme.textSecondary)
-                                .frame(width: 40, alignment: .trailing)
-                        }
-                        .padding(.horizontal, 16)
+                        let dayHours = viewModel.dailyHoursMap[day.date] ?? 0
+                        DayBarRow(
+                            day: day,
+                            dayHours: dayHours,
+                            maxMessages: week.maxDailyMessages,
+                            formatNumber: formatNumber
+                        )
                     }
                 }
             } else {
@@ -436,7 +456,7 @@ struct UsagePopover: View {
                     HStack(spacing: 4) {
                         Image(systemName: "clock")
                             .font(.system(size: 10))
-                            .foregroundStyle(Theme.slate)
+                            .foregroundStyle(Theme.steel)
                         Text("Avg \(String(format: "%.1f", uh.avgDailyHours))h/day")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textSecondary)
@@ -467,15 +487,11 @@ struct UsagePopover: View {
                                     let count = hours[String(h)] ?? 0
                                     let intensity = maxH > 0 ? Double(count) / Double(maxH) : 0
 
-                                    VStack(spacing: 1) {
-                                        RoundedRectangle(cornerRadius: 4)
-                                            .fill(Theme.purple.opacity(intensity * 0.8 + 0.05))
-                                            .frame(height: 22)
-                                        Text(hourLabel(h))
-                                            .font(.system(size: 8, design: .monospaced))
-                                            .foregroundStyle(Theme.textFaint)
-                                    }
-                                    .frame(maxWidth: .infinity)
+                                    HeatmapCell(
+                                        label: hourLabel(h),
+                                        count: count,
+                                        intensity: intensity
+                                    )
                                 }
                             }
                         }
@@ -530,7 +546,7 @@ struct UsagePopover: View {
                                 RoundedRectangle(cornerRadius: Theme.barRadius)
                                     .fill(
                                         LinearGradient(
-                                            colors: [Theme.slate.opacity(0.4), Theme.purple.opacity(0.6)],
+                                            colors: [Theme.steel.opacity(0.4), Theme.purple.opacity(0.6)],
                                             startPoint: .leading, endPoint: .trailing
                                         )
                                     )
@@ -595,13 +611,21 @@ struct UsagePopover: View {
     // MARK: - Footer
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: 12) {
             if let t = viewModel.lastAPIRefresh {
                 Text(t.formatted(.relative(presentation: .named)))
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.textFaint)
             }
             Spacer()
+            Button(action: { viewModel.exportData() }) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textMuted)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -622,7 +646,7 @@ struct UsagePopover: View {
     private func modelColor(_ name: String) -> Color {
         switch name {
         case "Opus":   Theme.purple
-        case "Sonnet": Theme.slate
+        case "Sonnet": Theme.steel
         case "Haiku":  Theme.green
         default:       Theme.textMuted
         }
@@ -685,5 +709,93 @@ struct InfoTipView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .background(Theme.bg)
             }
+    }
+}
+
+// MARK: - Heatmap Cell (instant hover tooltip)
+
+struct HeatmapCell: View {
+    let label: String
+    let count: Int
+    let intensity: Double
+    @State private var isHovering = false
+
+    var body: some View {
+        VStack(spacing: 1) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Theme.purple.opacity(intensity * 0.8 + 0.05))
+                    .frame(height: 22)
+                if isHovering && count > 0 {
+                    Text("\(count)")
+                        .font(.system(size: 9, weight: .bold, design: .rounded))
+                        .foregroundStyle(Theme.textPrimary)
+                }
+            }
+            Text(label)
+                .font(.system(size: 8, design: .monospaced))
+                .foregroundStyle(Theme.textFaint)
+        }
+        .frame(maxWidth: .infinity)
+        .onHover { isHovering = $0 }
+    }
+}
+
+// MARK: - Day Bar Row (instant hover detail)
+
+struct DayBarRow: View {
+    let day: DailyActivity
+    let dayHours: Double
+    let maxMessages: Int
+    let formatNumber: (Int) -> String
+    @State private var isHovering = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Text(day.weekday)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 32, alignment: .leading)
+
+                GeometryReader { geo in
+                    let ratio = maxMessages > 0
+                        ? CGFloat(day.messageCount) / CGFloat(maxMessages) : 0
+                    RoundedRectangle(cornerRadius: Theme.barRadius)
+                        .fill(
+                            LinearGradient(
+                                colors: [Theme.purple.opacity(0.5), Theme.purple.opacity(0.7)],
+                                startPoint: .leading, endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(4, geo.size.width * ratio))
+                }
+                .frame(height: 14)
+
+                Text(formatNumber(day.messageCount))
+                    .font(.system(size: 12, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Theme.textSecondary)
+                    .frame(width: 40, alignment: .trailing)
+            }
+            .padding(.horizontal, 16)
+
+            if isHovering {
+                HStack(spacing: 8) {
+                    Text("\(day.sessionCount) sessions")
+                    Text("\(day.toolCallCount) tools")
+                    if dayHours > 0 {
+                        Text(String(format: "%.1fh", dayHours))
+                    }
+                }
+                .font(.system(size: 9))
+                .foregroundStyle(Theme.textFaint)
+                .padding(.horizontal, 16)
+                .padding(.top, 2)
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.15)) { isHovering = hovering }
+        }
     }
 }

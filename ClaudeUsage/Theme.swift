@@ -1,27 +1,32 @@
 import SwiftUI
 
-// stonerOS design system — warm dark, muted accents, high-density functional
+// stonerOS design system — warm neutrals, muted accents, high-density functional
+// Light values from design_themes.md; dark values are the original palette.
+@MainActor
 enum Theme {
-    // Brand palette (dark variants)
-    static let purple = Color(hex: 0x8A75D6)   // Primary — system building, AI
-    static let slate  = Color(hex: 0x6A9CC4)   // Supporting
-    static let green  = Color(hex: 0x66B47A)   // Success, growth
-    static let gold   = Color(hex: 0xD4AD3A)   // Warmth, warning
-    static let coral  = Color(hex: 0xD47878)   // Energy, urgency
+    @AppStorage("appearance") static var isDark: Bool = true
 
-    // Background — warm dark brown-black
-    static let bg = Color(hex: 0x110A0F)
+    // Brand palette — light/dark variants from design_themes.md
+    static var purple: Color { isDark ? Color(hex: 0x8A75D6) : Color(hex: 0x6D5ACD) }
+    static var steel: Color  { isDark ? Color(hex: 0x7B9BE0) : Color(hex: 0x557BCC) }
+    static var rose: Color   { isDark ? Color(hex: 0xD48A9E) : Color(hex: 0xC47088) }
+    static var green: Color  { isDark ? Color(hex: 0x66B47A) : Color(hex: 0x4A9960) }
+    static var gold: Color   { isDark ? Color(hex: 0xD4AD3A) : Color(hex: 0xB8941F) }
+    static var coral: Color  { isDark ? Color(hex: 0xD47878) : Color(hex: 0xC06060) }
 
-    // Text — warm neutrals, never pure white
-    static let textPrimary   = Color(hex: 0xD2CBC7)
-    static let textSecondary = Color(hex: 0xB5ACA7)
-    static let textMuted     = Color(hex: 0x908580)
-    static let textFaint     = Color(hex: 0x645A56)
+    // Backgrounds
+    static var bg: Color { isDark ? Color(hex: 0x110A0F) : Color(hex: 0xF1F0ED) }
 
-    // Surfaces — translucent white, not solid gray
-    static let cardBg     = Color.white.opacity(0.06)
-    static let cardBorder = Color.white.opacity(0.08)
-    static let hoverBg    = Color.white.opacity(0.04)
+    // Text
+    static var textPrimary: Color   { isDark ? Color(hex: 0xD2CBC7) : Color(hex: 0x1A1A1A) }
+    static var textSecondary: Color { isDark ? Color(hex: 0xB5ACA7) : Color(hex: 0x666666) }
+    static var textMuted: Color     { isDark ? Color(hex: 0x908580) : Color(hex: 0x666666) }
+    static var textFaint: Color     { isDark ? Color(hex: 0x645A56) : Color(hex: 0x999999) }
+
+    // Surfaces
+    static var cardBg: Color     { isDark ? Color.white.opacity(0.06) : Color.white }
+    static var cardBorder: Color { isDark ? Color.white.opacity(0.08) : Color.black.opacity(0.06) }
+    static var hoverBg: Color    { isDark ? Color.white.opacity(0.04) : Color.black.opacity(0.02) }
 
     // Radii (design charter)
     static let cardRadius: CGFloat = 12
