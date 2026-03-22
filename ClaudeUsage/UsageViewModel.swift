@@ -13,13 +13,16 @@ final class UsageViewModel: ObservableObject {
     @Published var stats: StatsCache?
     @Published var todayActivity: DailyActivity?
     @Published var currentWeek: WeeklySummary?
+    @Published var usageHours: UsageHours?
+    @Published var costAnalysis: CostAnalysis?
 
     @Published var selectedTab: Tab = .limits
 
     enum Tab: String, CaseIterable, Sendable {
         case limits = "Plan"
         case week = "Week"
-        case allTime = "Stats"
+        case cost = "Cost"
+        case patterns = "When"
     }
 
     private var apiTimer: AnyCancellable?
@@ -208,6 +211,8 @@ final class UsageViewModel: ObservableObject {
         self.stats = decoded
         self.todayActivity = decoded.dailyActivity.first { $0.date == todayStr }
         self.currentWeek = buildWeekSummary(from: decoded, weekStart: mondayStr, weekEnd: todayStr)
+        self.usageHours = computeUsageHours(todayStr: todayStr, mondayStr: mondayStr)
+        self.costAnalysis = computeCost(from: decoded)
     }
 
     private func buildWeekSummary(from stats: StatsCache, weekStart: String, weekEnd: String) -> WeeklySummary {
@@ -226,6 +231,107 @@ final class UsageViewModel: ObservableObject {
             totalSessions: days.map(\.sessionCount).reduce(0, +),
             totalToolCalls: days.map(\.toolCallCount).reduce(0, +),
             totalTokens: totalTokens
+        )
+    }
+
+    private func computeCost(from stats: StatsCache) -> CostAnalysis {
+        // API pricing per million tokens
+        struct ModelPrice {
+            let input: Double; let output: Double
+            let cacheRead: Double; let cacheCreate: Double
+        }
+        let prices: [String: ModelPrice] = [
+            "claude-opus-4-6": ModelPrice(input: 15, output: 75, cacheRead: 1.5, cacheCreate: 18.75),
+            "claude-sonnet-4-6": ModelPrice(input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75),
+            "claude-haiku-4-5-20251001": ModelPrice(input: 0.8, output: 4, cacheRead: 0.08, cacheCreate: 1.0),
+        ]
+        let fallback = ModelPrice(input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75)
+
+        var totalCost = 0.0
+        var modelCosts: [(String, Double)] = []
+
+        for (model, usage) in stats.modelUsage {
+            let p = prices[model] ?? fallback
+            let cost = Double(usage.inputTokens) / 1e6 * p.input
+                + Double(usage.outputTokens) / 1e6 * p.output
+                + Double(usage.cacheReadInputTokens) / 1e6 * p.cacheRead
+                + Double(usage.cacheCreationInputTokens) / 1e6 * p.cacheCreate
+            totalCost += cost
+            modelCosts.append((Self.shortModel(model), cost))
+        }
+        modelCosts.sort { $0.1 > $1.1 }
+
+        let days = max(stats.dailyActivity.count, 1)
+        let daily = totalCost / Double(days)
+        let monthly = daily * 30
+        let planCost = 100.0 // Max 5x
+
+        return CostAnalysis(
+            totalAPICost: totalCost,
+            dailyAvgCost: daily,
+            monthlyProjection: monthly,
+            modelCosts: modelCosts,
+            daysTracked: days,
+            planCost: planCost,
+            roi: monthly / planCost
+        )
+    }
+
+    private func computeUsageHours(todayStr: String, mondayStr: String) -> UsageHours? {
+        let historyPath = FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/history.jsonl"
+        guard let content = try? String(contentsOfFile: historyPath, encoding: .utf8) else { return nil }
+
+        // Parse sessions from history.jsonl
+        struct HistoryEntry: Codable {
+            let timestamp: Int64
+            let sessionId: String?
+        }
+
+        var sessions: [String: [Int64]] = [:]
+        for line in content.split(separator: "\n") {
+            guard let data = line.data(using: .utf8),
+                  let entry = try? JSONDecoder().decode(HistoryEntry.self, from: data),
+                  let sid = entry.sessionId
+            else { continue }
+            sessions[sid, default: []].append(entry.timestamp)
+        }
+
+        // Calculate active time: sum gaps between messages that are < 10 min apart
+        let maxGap: Int64 = 600_000 // 10 min in ms
+        var dailyMs: [String: Int64] = [:]
+
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd"
+
+        for (_, timestamps) in sessions {
+            let sorted = timestamps.sorted()
+            guard sorted.count >= 2 else { continue }
+
+            let startDate = dateFormatter.string(from: Date(timeIntervalSince1970: Double(sorted[0]) / 1000))
+
+            var activeMs: Int64 = 0
+            for i in 1..<sorted.count {
+                let gap = sorted[i] - sorted[i - 1]
+                if gap <= maxGap {
+                    activeMs += gap
+                }
+            }
+            dailyMs[startDate, default: 0] += activeMs
+        }
+
+        let totalMs = dailyMs.values.reduce(Int64(0), +)
+        let totalHours = Double(totalMs) / 3_600_000
+        let daysActive = dailyMs.count
+
+        let weekMs = dailyMs.filter { $0.key >= mondayStr }.values.reduce(Int64(0), +)
+        let todayMs = dailyMs[todayStr] ?? 0
+
+        return UsageHours(
+            totalHours: totalHours,
+            thisWeekHours: Double(weekMs) / 3_600_000,
+            todayHours: Double(todayMs) / 3_600_000,
+            avgDailyHours: daysActive > 0 ? totalHours / Double(daysActive) : 0,
+            daysActive: daysActive
         )
     }
 

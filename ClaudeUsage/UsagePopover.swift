@@ -14,24 +14,27 @@ struct UsagePopover: View {
 
             tabPicker
 
-            ScrollView(.vertical, showsIndicators: false) {
-                VStack(spacing: 0) {
-                    switch viewModel.selectedTab {
-                    case .limits: limitsView
-                    case .week:   weekView
-                    case .allTime: allTimeView
-                    }
+            VStack(spacing: 0) {
+                switch viewModel.selectedTab {
+                case .limits: limitsView
+                case .week:   weekView
+                case .cost: costView
+                case .patterns: patternsView
                 }
-                .padding(.top, 8)
-                .padding(.bottom, 16)
             }
+            .padding(.top, 8)
+            .padding(.bottom, 12)
+
+            Spacer(minLength: 0)
 
             Rectangle()
                 .fill(Theme.purple.opacity(0.2))
                 .frame(height: 1)
             footer
         }
-        .frame(width: 320, height: 420)
+        .frame(width: 320)
+        .frame(maxHeight: 700)
+        .fixedSize(horizontal: false, vertical: true)
         .background(Theme.bg)
     }
 
@@ -258,17 +261,29 @@ struct UsagePopover: View {
         .frame(maxWidth: .infinity)
     }
 
-    // MARK: - All Time
+    // MARK: - Cost
 
-    private var allTimeView: some View {
+    private var costView: some View {
         VStack(spacing: 12) {
-            if let stats = viewModel.stats {
-                // Top stats
-                HStack(spacing: 0) {
-                    weekStat(formatNumber(stats.totalMessages), "messages", tip: "All-time total")
-                    dividerDot
-                    weekStat("\(stats.totalSessions)", "sessions", tip: "All-time total")
+            if let cost = viewModel.costAnalysis {
+                // Big ROI number
+                VStack(spacing: 2) {
+                    HStack(alignment: .firstTextBaseline, spacing: 0) {
+                        Text("\(Int(cost.roi))")
+                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .foregroundStyle(Theme.green)
+                        Text("x")
+                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .foregroundStyle(Theme.green.opacity(0.6))
+                    }
+                    HStack(spacing: 2) {
+                        Text("ROI on $100/mo Max")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textMuted)
+                        infoTip("Ceiling estimate. Real API usage would likely be lower — you'd optimize prompts and context if paying per-token.")
+                    }
                 }
+                .frame(maxWidth: .infinity)
                 .padding(.vertical, 10)
                 .background(Theme.cardBg)
                 .overlay(
@@ -278,63 +293,302 @@ struct UsagePopover: View {
                 .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
                 .padding(.horizontal, 12)
 
-                // Model cards
+                // Cost comparison
                 VStack(spacing: 6) {
-                    Text("TOKEN USAGE")
+                    HStack(spacing: 2) {
+                        Text("IF YOU PAID API RATES")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.textFaint)
+                            .tracking(0.8)
+                        infoTip("Based on published anthropic.com/pricing. Cache reads are ~63% of cost — on API you pay per read, on Max it's unlimited.")
+                        Spacer()
+                    }
+                    .padding(.horizontal, 16)
+
+                    costRow("Total spent", "$\(formatCost(cost.totalAPICost))",
+                            tip: "Token counts from stats-cache.json (last updated by Claude Code)")
+                    costRow("Daily avg", "$\(formatCost(cost.dailyAvgCost))",
+                            tip: "Total ÷ \(cost.daysTracked) active days")
+                    costRow("Monthly proj", "$\(formatCost(cost.monthlyProjection))",
+                            tip: "Daily avg × 30. Assumes consistent usage.")
+                }
+
+                // Plan comparison
+                VStack(spacing: 6) {
+                    Text("PLAN COMPARISON")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.textFaint)
                         .tracking(0.8)
                         .padding(.horizontal, 16)
 
-                    ForEach(Array(stats.modelUsage.sorted { $0.value.outputTokens > $1.value.outputTokens }), id: \.key) { model, usage in
+                    planRow("API", cost.monthlyProjection, isCurrent: false)
+                    planRow("Pro $20", 20, isCurrent: false)
+                    planRow("Max 5x $100", 100, isCurrent: true)
+                    planRow("Max 20x $200", 200, isCurrent: false)
+                }
+
+                // Per-model breakdown
+                VStack(spacing: 4) {
+                    HStack(spacing: 2) {
+                        Text("COST BY MODEL")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(Theme.textFaint)
+                            .tracking(0.8)
+                        infoTip("Includes input, output, cache read, and cache creation tokens at published API rates.")
+                        Spacer()
+                    }
+                        .padding(.horizontal, 16)
+
+                    ForEach(cost.modelCosts, id: \.model) { mc in
                         HStack {
-                            // Left accent stripe
                             RoundedRectangle(cornerRadius: 2)
-                                .fill(modelColor(UsageViewModel.shortModel(model)))
-                                .frame(width: 3, height: 28)
-
-                            Text(UsageViewModel.shortModel(model))
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(Theme.textPrimary)
-                                .frame(width: 52, alignment: .leading)
-
+                                .fill(modelColor(mc.model))
+                                .frame(width: 3, height: 16)
+                            Text(mc.model)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
                             Spacer()
+                            Text("$\(formatCost(mc.cost))")
+                                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Theme.textPrimary)
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+            } else {
+                emptyPlaceholder("No cost data")
+            }
+        }
+    }
 
-                            VStack(alignment: .trailing, spacing: 2) {
-                                HStack(spacing: 4) {
-                                    Text("out")
-                                        .foregroundStyle(Theme.textFaint)
-                                    Text(formatNumber(usage.outputTokens))
-                                        .foregroundStyle(Theme.textSecondary)
-                                    infoTip("Tokens generated by Claude")
-                                }
-                                HStack(spacing: 4) {
-                                    Text("cache")
-                                        .foregroundStyle(Theme.textFaint)
-                                    Text(formatNumber(usage.cacheReadInputTokens))
-                                        .foregroundStyle(Theme.textSecondary)
-                                    infoTip("Tokens served from prompt cache")
+    private func costRow(_ label: String, _ value: String, tip: String) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.textSecondary)
+            infoTip(tip)
+            Spacer()
+            Text(value)
+                .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                .foregroundStyle(Theme.textPrimary)
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func planRow(_ name: String, _ price: Double, isCurrent: Bool) -> some View {
+        let monthly = viewModel.costAnalysis?.monthlyProjection ?? 0
+        let savings = monthly - price
+        return HStack {
+            if isCurrent {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(Theme.green)
+            }
+            Text(name)
+                .font(.system(size: 12, weight: isCurrent ? .semibold : .regular))
+                .foregroundStyle(isCurrent ? Theme.textPrimary : Theme.textSecondary)
+            Spacer()
+            if price > 500 {
+                Text("$\(formatCost(price))/mo")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.coral)
+            } else {
+                Text("save $\(formatCost(savings))")
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(Theme.green)
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func formatCost(_ n: Double) -> String {
+        if n >= 1000 { return String(format: "%.0f", n) }
+        if n >= 100 { return String(format: "%.0f", n) }
+        return String(format: "%.2f", n)
+    }
+
+    // MARK: - Patterns
+
+    private var patternsView: some View {
+        VStack(spacing: 12) {
+            if let stats = viewModel.stats {
+                // Usage hours summary
+                if let uh = viewModel.usageHours {
+                    HStack(spacing: 0) {
+                        weekStat(String(format: "%.1f", uh.todayHours), "today",
+                                 tip: "Active hours today")
+                        dividerDot
+                        weekStat(String(format: "%.1f", uh.thisWeekHours), "this week",
+                                 tip: "Active hours Mon–now")
+                        dividerDot
+                        weekStat(String(format: "%.0f", uh.totalHours), "all time",
+                                 tip: "\(uh.daysActive) active days")
+                    }
+                    .padding(.vertical, 10)
+                    .background(Theme.cardBg)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.cardRadius)
+                            .stroke(Theme.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                    .padding(.horizontal, 12)
+
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.slate)
+                        Text("Avg \(String(format: "%.1f", uh.avgDailyHours))h/day")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textSecondary)
+                        Text("across \(uh.daysActive) days")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                    .padding(.horizontal, 16)
+                }
+
+                // Hour of day heatmap
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("PEAK HOURS")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.textFaint)
+                        .tracking(0.8)
+                        .padding(.horizontal, 16)
+
+                    let hours = stats.hourCounts ?? [:]
+                    let maxH = hours.values.max() ?? 1
+
+                    // Grid: 6 columns x 4 rows (0-23)
+                    VStack(spacing: 3) {
+                        ForEach(0..<4, id: \.self) { row in
+                            HStack(spacing: 3) {
+                                ForEach(0..<6, id: \.self) { col in
+                                    let h = row * 6 + col
+                                    let count = hours[String(h)] ?? 0
+                                    let intensity = maxH > 0 ? Double(count) / Double(maxH) : 0
+
+                                    VStack(spacing: 1) {
+                                        RoundedRectangle(cornerRadius: 4)
+                                            .fill(Theme.purple.opacity(intensity * 0.8 + 0.05))
+                                            .frame(height: 22)
+                                        Text(hourLabel(h))
+                                            .font(.system(size: 8, design: .monospaced))
+                                            .foregroundStyle(Theme.textFaint)
+                                    }
+                                    .frame(maxWidth: .infinity)
                                 }
                             }
-                            .font(.system(size: 11, design: .monospaced))
                         }
-                        .padding(.vertical, 8)
-                        .padding(.horizontal, 12)
-                        .background(Theme.cardBg)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: Theme.cardRadius)
-                                .stroke(Theme.cardBorder, lineWidth: 1)
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
-                        .padding(.horizontal, 12)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 4)
+                    .background(Theme.cardBg)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.cardRadius)
+                            .stroke(Theme.cardBorder, lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.cardRadius))
+                    .padding(.horizontal, 12)
+
+                    // Peak hour callout
+                    if let peak = hours.max(by: { $0.value < $1.value }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "flame.fill")
+                                .font(.system(size: 10))
+                                .foregroundStyle(Theme.coral)
+                            Text("Most active: \(hourLabel(Int(peak.key) ?? 0))")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textSecondary)
+                            Text("(\(peak.value) sessions)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.textFaint)
+                        }
+                        .padding(.horizontal, 16)
                     }
                 }
 
-                Text("Since \(formatISODate(stats.firstSessionDate))")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.textFaint)
-                    .padding(.top, 4)
+                // Day of week breakdown
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("BUSIEST DAYS")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.textFaint)
+                        .tracking(0.8)
+                        .padding(.horizontal, 16)
+
+                    let dowData = dayOfWeekAverages(from: stats.dailyActivity)
+                    let maxAvg = dowData.map(\.avg).max() ?? 1
+
+                    ForEach(dowData, id: \.day) { d in
+                        HStack(spacing: 8) {
+                            Text(d.day)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: 32, alignment: .leading)
+
+                            GeometryReader { geo in
+                                let ratio = maxAvg > 0 ? CGFloat(d.avg) / CGFloat(maxAvg) : 0
+                                RoundedRectangle(cornerRadius: Theme.barRadius)
+                                    .fill(
+                                        LinearGradient(
+                                            colors: [Theme.slate.opacity(0.4), Theme.purple.opacity(0.6)],
+                                            startPoint: .leading, endPoint: .trailing
+                                        )
+                                    )
+                                    .frame(width: max(4, geo.size.width * ratio))
+                            }
+                            .frame(height: 14)
+
+                            Text("\(d.avg)")
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundStyle(Theme.textSecondary)
+                                .frame(width: 40, alignment: .trailing)
+                        }
+                        .padding(.horizontal, 16)
+                    }
+
+                    Text("avg messages/day")
+                        .font(.system(size: 10))
+                        .foregroundStyle(Theme.textFaint)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 2)
+                }
+            } else {
+                emptyPlaceholder("No pattern data")
             }
+        }
+    }
+
+    private func hourLabel(_ h: Int) -> String {
+        if h == 0 { return "12a" }
+        if h < 12 { return "\(h)a" }
+        if h == 12 { return "12p" }
+        return "\(h - 12)p"
+    }
+
+    private struct DayAvg {
+        let day: String
+        let avg: Int
+    }
+
+    private func dayOfWeekAverages(from activity: [DailyActivity]) -> [DayAvg] {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+        let dayFormatter = DateFormatter()
+        dayFormatter.dateFormat = "EEE"
+
+        var buckets: [Int: [Int]] = [:]  // weekday number -> message counts
+        for a in activity {
+            guard let date = formatter.date(from: a.date) else { continue }
+            let wd = Calendar.current.component(.weekday, from: date) // 1=Sun
+            buckets[wd, default: []].append(a.messageCount)
+        }
+
+        let order = [2, 3, 4, 5, 6, 7, 1] // Mon-Sun
+        let names = [2: "Mon", 3: "Tue", 4: "Wed", 5: "Thu", 6: "Fri", 7: "Sat", 1: "Sun"]
+
+        return order.map { wd in
+            let vals = buckets[wd] ?? [0]
+            return DayAvg(day: names[wd]!, avg: vals.reduce(0, +) / max(vals.count, 1))
         }
     }
 

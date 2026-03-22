@@ -98,6 +98,7 @@ struct StatsCache: Codable {
     let totalSessions: Int
     let totalMessages: Int
     let firstSessionDate: String
+    let hourCounts: [String: Int]?
 }
 
 struct DailyActivity: Codable, Identifiable {
@@ -132,6 +133,24 @@ struct ModelUsage: Codable {
     let outputTokens: Int
     let cacheReadInputTokens: Int
     let cacheCreationInputTokens: Int
+}
+
+struct CostAnalysis {
+    let totalAPICost: Double
+    let dailyAvgCost: Double
+    let monthlyProjection: Double
+    let modelCosts: [(model: String, cost: Double)]
+    let daysTracked: Int
+    let planCost: Double  // Max 5x = 200
+    let roi: Double
+}
+
+struct UsageHours {
+    let totalHours: Double
+    let thisWeekHours: Double
+    let todayHours: Double
+    let avgDailyHours: Double
+    let daysActive: Int
 }
 
 struct WeeklySummary {
