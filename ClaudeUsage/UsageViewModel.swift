@@ -33,8 +33,8 @@ final class UsageViewModel: ObservableObject {
     }
 
     private var apiTimer: AnyCancellable?
-    private var fileMonitor: DispatchSourceFileSystemObject?
     private var statsTimer: AnyCancellable?
+    private let statsComputer = StatsComputer()
 
     private let apiURL = "https://api.anthropic.com/api/oauth/usage"
     private var pollInterval: TimeInterval = 300 // poll every 5 min
@@ -72,7 +72,6 @@ final class UsageViewModel: ObservableObject {
         loadCachedUsage()
         fetchUsage()
         loadLocalStats()
-        startFileMonitor()
 
         // Poll API every 2 min (backs off on 429)
         apiTimer = Timer.publish(every: 30, on: .main, in: .common)
@@ -89,8 +88,8 @@ final class UsageViewModel: ObservableObject {
                 }
             }
 
-        // Poll local stats every 30s
-        statsTimer = Timer.publish(every: 30, on: .main, in: .common)
+        // Poll local stats every 60s (parses JSONL files, uses dir mod time to skip if unchanged)
+        statsTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 Task { @MainActor in self?.loadLocalStats() }
@@ -230,15 +229,25 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Local Stats
 
-    private var statsPath: String {
-        FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/stats-cache.json"
+    func loadLocalStats() {
+        Task {
+            guard let decoded = await statsComputer.computeIfNeeded() else { return }
+            await MainActor.run {
+                applyStats(decoded)
+            }
+        }
     }
 
-    func loadLocalStats() {
-        guard let data = FileManager.default.contents(atPath: statsPath),
-              let decoded = try? JSONDecoder().decode(StatsCache.self, from: data)
-        else { return }
+    func forceReloadStats() {
+        Task {
+            guard let decoded = await statsComputer.forceCompute() else { return }
+            await MainActor.run {
+                applyStats(decoded)
+            }
+        }
+    }
 
+    private func applyStats(_ decoded: StatsCache) {
         let today = Date()
         let todayStr = Self.dateString(from: today)
         let calendar = Calendar.current
@@ -378,21 +387,6 @@ final class UsageViewModel: ObservableObject {
         ), hoursMap)
     }
 
-    private func startFileMonitor() {
-        let path = statsPath
-        let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: [.write, .rename], queue: .global()
-        )
-        source.setEventHandler { [weak self] in
-            Task { @MainActor in self?.loadLocalStats() }
-        }
-        source.setCancelHandler { close(fd) }
-        source.resume()
-        fileMonitor = source
-    }
-
     // MARK: - Export
 
     func exportData() {
@@ -479,7 +473,4 @@ final class UsageViewModel: ObservableObject {
         return name
     }
 
-    deinit {
-        fileMonitor?.cancel()
-    }
 }

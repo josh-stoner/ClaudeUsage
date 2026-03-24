@@ -432,6 +432,23 @@ struct UsagePopover: View {
     private var patternsView: some View {
         VStack(spacing: 12) {
             if let stats = viewModel.stats {
+                // Tracking period
+                if let first = stats.dailyActivity.first?.date,
+                   let last = stats.dailyActivity.last?.date {
+                    HStack(spacing: 4) {
+                        Image(systemName: "calendar")
+                            .font(.system(size: 10))
+                            .foregroundStyle(Theme.steel)
+                        Text("\(formatShortDate(first)) – \(formatShortDate(last))")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.textSecondary)
+                        Text("(\(stats.dailyActivity.count) days)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.textFaint)
+                    }
+                    .padding(.horizontal, 16)
+                }
+
                 // Usage hours summary
                 if let uh = viewModel.usageHours {
                     HStack(spacing: 0) {
@@ -678,6 +695,15 @@ struct UsagePopover: View {
         if n >= 1_000_000 { return String(format: "%.1fM", Double(n) / 1e6) }
         if n >= 1_000 { return String(format: "%.1fK", Double(n) / 1e3) }
         return "\(n)"
+    }
+
+    private func formatShortDate(_ dateStr: String) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        guard let date = f.date(from: dateStr) else { return dateStr }
+        let display = DateFormatter()
+        display.dateFormat = "MMM d"
+        return display.string(from: date)
     }
 
     private func formatISODate(_ iso: String) -> String {
