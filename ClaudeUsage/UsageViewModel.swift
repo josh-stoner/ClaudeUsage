@@ -2,6 +2,9 @@ import Foundation
 import AppKit
 import Combine
 import Security
+import os.log
+
+private let logger = Logger(subsystem: "com.stoneros.claude-usage", category: "api")
 
 @MainActor
 final class UsageViewModel: ObservableObject {
@@ -106,6 +109,7 @@ final class UsageViewModel: ObservableObject {
 
         guard let token = readOAuthToken() else {
             apiError = "No OAuth token found"
+            logger.error("No OAuth token found in keychain")
             if force {
                 refreshState = .failed
                 Task {
@@ -128,6 +132,7 @@ final class UsageViewModel: ObservableObject {
                 request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
 
                 let (data, response) = try await URLSession.shared.data(for: request)
+                logger.info("API response: \(data.count) bytes")
 
                 guard let http = response as? HTTPURLResponse else {
                     self.apiError = "Invalid response"
@@ -158,6 +163,7 @@ final class UsageViewModel: ObservableObject {
                 }
 
                 guard http.statusCode == 200 else {
+                    logger.error("API error: HTTP \(http.statusCode), body: \(String(data: data, encoding: .utf8) ?? "nil")")
                     self.apiError = "HTTP \(http.statusCode)"
                     resultState = .failed
                     if force { await finishRefresh(resultState, startedAt: startTime) }
@@ -173,6 +179,7 @@ final class UsageViewModel: ObservableObject {
                 try? data.write(to: self.cacheURL, options: .atomic)
                 if force { await finishRefresh(.done, startedAt: startTime) }
             } catch {
+                logger.error("Fetch error: \(error)")
                 self.apiError = error.localizedDescription
                 if force { await finishRefresh(.failed, startedAt: startTime) }
             }
@@ -218,11 +225,15 @@ final class UsageViewModel: ObservableObject {
 
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        logger.info("Keychain read status: \(status) (0 = success)")
 
         guard status == errSecSuccess,
               let data = result as? Data,
               let creds = try? JSONDecoder().decode(ClaudeCredentials.self, from: data)
-        else { return nil }
+        else {
+            logger.error("Keychain read failed: status=\(status), hasData=\(result != nil)")
+            return nil
+        }
 
         return creds.claudeAiOauth.accessToken
     }
