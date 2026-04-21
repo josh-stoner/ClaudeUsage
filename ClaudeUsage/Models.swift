@@ -76,7 +76,7 @@ struct ExtraUsage: Codable {
 
 struct ClaudeCredentials: Codable {
     let claudeAiOauth: OAuthData
-    let organizationUuid: String
+    let organizationUuid: String?
 
     struct OAuthData: Codable {
         let accessToken: String
