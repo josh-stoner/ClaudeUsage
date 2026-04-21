@@ -8,11 +8,9 @@ struct ClaudeUsageApp: App {
         MenuBarExtra {
             UsagePopover(viewModel: viewModel)
         } label: {
-            HStack(spacing: 3) {
-                Image(systemName: "sparkle")
-                Text(viewModel.menuBarTitle)
-                    .font(.system(.caption, design: .monospaced))
-            }
+            Text(viewModel.menuBarTitle)
+                .font(.system(.caption, design: .monospaced))
+                .monospacedDigit()
         }
         .menuBarExtraStyle(.window)
     }

@@ -8,10 +8,10 @@ struct UsagePopover: View {
         VStack(spacing: 0) {
             header
 
-            // Purple accent stripe (color-as-wayfinding)
+            // Chroma-header: 2px page-accent stripe (design charter — wayfinding)
             Rectangle()
-                .fill(Theme.purple.opacity(0.4))
-                .frame(height: 1)
+                .fill(Theme.purple.opacity(0.5))
+                .frame(height: 2)
 
             tabPicker
 
@@ -43,12 +43,16 @@ struct UsagePopover: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "sparkle")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.purple)
-            Text("Claude Code")
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Theme.textPrimary)
+            // Typographic mark: "Claude" (primary) + "Usage" (purple accent)
+            // Inter 800, tight negative tracking per brand mark system
+            HStack(spacing: 0) {
+                Text("Claude")
+                    .foregroundStyle(Theme.textPrimary)
+                Text("Usage")
+                    .foregroundStyle(Theme.purple)
+            }
+            .font(.system(size: 14, weight: .heavy))
+            .tracking(-0.4)
             Spacer()
             if viewModel.apiError != nil {
                 Image(systemName: "exclamationmark.triangle.fill")
@@ -169,24 +173,26 @@ struct UsagePopover: View {
                 infoTip(tip)
                 Spacer()
                 Text("\(Int(pct))")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
+                    .font(.system(size: 24, weight: .semibold))
+                    .monospacedDigit()
+                    .tracking(-0.5)
                     .foregroundStyle(pctColor(pct))
                 Text("%")
-                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(pctColor(pct).opacity(0.5))
             }
 
-            // Progress bar
+            // Progress bar — 4px ultra-thin per design charter
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: Theme.barRadius)
-                        .fill(Theme.cardBg)
-                    RoundedRectangle(cornerRadius: Theme.barRadius)
+                    Capsule()
+                        .fill(Color.white.opacity(0.06))
+                    Capsule()
                         .fill(pct >= 80 ? Theme.coral : tint)
                         .frame(width: max(3, geo.size.width * pct / 100))
                 }
             }
-            .frame(height: 6)
+            .frame(height: 4)
 
             Text(subtitle)
                 .font(.system(size: 11))
@@ -269,7 +275,9 @@ struct UsagePopover: View {
     private func weekStat(_ value: String, _ label: String, tip: String) -> some View {
         VStack(spacing: 2) {
             Text(value)
-                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold))
+                .monospacedDigit()
+                .tracking(-0.2)
                 .foregroundStyle(Theme.textPrimary)
             HStack(spacing: 2) {
                 Text(label)
@@ -290,10 +298,12 @@ struct UsagePopover: View {
                 VStack(spacing: 2) {
                     HStack(alignment: .firstTextBaseline, spacing: 0) {
                         Text("\(Int(cost.roi))")
-                            .font(.system(size: 36, weight: .bold, design: .rounded))
+                            .font(.system(size: 36, weight: .semibold))
+                            .monospacedDigit()
+                            .tracking(-0.8)
                             .foregroundStyle(Theme.green)
                         Text("x")
-                            .font(.system(size: 18, weight: .semibold, design: .rounded))
+                            .font(.system(size: 18, weight: .medium))
                             .foregroundStyle(Theme.green.opacity(0.6))
                     }
                     HStack(spacing: 2) {
@@ -563,7 +573,7 @@ struct UsagePopover: View {
                                 RoundedRectangle(cornerRadius: Theme.barRadius)
                                     .fill(
                                         LinearGradient(
-                                            colors: [Theme.steel.opacity(0.4), Theme.purple.opacity(0.6)],
+                                            colors: [Theme.lavender.opacity(0.5), Theme.purple.opacity(0.7)],
                                             startPoint: .leading, endPoint: .trailing
                                         )
                                     )

@@ -7,12 +7,13 @@ enum Theme {
     @AppStorage("appearance") static var isDark: Bool = true
 
     // Brand palette — light/dark variants from design_themes.md
-    static var purple: Color { isDark ? Color(hex: 0x8A75D6) : Color(hex: 0x6D5ACD) }
-    static var steel: Color  { isDark ? Color(hex: 0x7B9BE0) : Color(hex: 0x557BCC) }
-    static var rose: Color   { isDark ? Color(hex: 0xD48A9E) : Color(hex: 0xC47088) }
-    static var green: Color  { isDark ? Color(hex: 0x66B47A) : Color(hex: 0x4A9960) }
-    static var gold: Color   { isDark ? Color(hex: 0xD4AD3A) : Color(hex: 0xB8941F) }
-    static var coral: Color  { isDark ? Color(hex: 0xD47878) : Color(hex: 0xC06060) }
+    static var purple: Color   { isDark ? Color(hex: 0x8A75D6) : Color(hex: 0x6D5ACD) }
+    static var lavender: Color { isDark ? Color(hex: 0xAC9EE0) : Color(hex: 0x9183D1) }
+    static var steel: Color    { isDark ? Color(hex: 0x7B9BE0) : Color(hex: 0x557BCC) }
+    static var rose: Color     { isDark ? Color(hex: 0xD48A9E) : Color(hex: 0xC47088) }
+    static var green: Color    { isDark ? Color(hex: 0x66B47A) : Color(hex: 0x4A9960) }
+    static var gold: Color     { isDark ? Color(hex: 0xD4AD3A) : Color(hex: 0xB8941F) }
+    static var coral: Color    { isDark ? Color(hex: 0xD47878) : Color(hex: 0xC06060) }
 
     // Backgrounds
     static var bg: Color { isDark ? Color(hex: 0x110A0F) : Color(hex: 0xF1F0ED) }
