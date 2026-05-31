@@ -297,10 +297,13 @@ final class UsageViewModel: ObservableObject {
         self.stats = decoded
         self.todayActivity = decoded.dailyActivity.first { $0.date == todayStr }
         self.currentWeek = buildWeekSummary(from: decoded, weekStart: mondayStr, weekEnd: todayStr)
+        // Compute hours first — history.jsonl often has an earlier start date than project JSONLs
         let (hours, hoursMap) = computeUsageHours(todayStr: todayStr, mondayStr: mondayStr)
         self.usageHours = hours
         self.dailyHoursMap = hoursMap
-        self.costAnalysis = computeCost(from: decoded)
+        // Use earliest date across both sources for an accurate calendar span
+        let historyFirstDate = hoursMap.keys.min()
+        self.costAnalysis = computeCost(from: decoded, historyFirstDate: historyFirstDate)
     }
 
     private func buildWeekSummary(from stats: StatsCache, weekStart: String, weekEnd: String) -> WeeklySummary {
@@ -322,7 +325,7 @@ final class UsageViewModel: ObservableObject {
         )
     }
 
-    private func computeCost(from stats: StatsCache) -> CostAnalysis {
+    private func computeCost(from stats: StatsCache, historyFirstDate: String? = nil) -> CostAnalysis {
         // API pricing per million tokens, keyed by display family so any
         // future model version (e.g. claude-opus-4-8, claude-opus-4-9…)
         // is automatically priced correctly via shortModel() family matching.
@@ -357,20 +360,23 @@ final class UsageViewModel: ObservableObject {
             .map { (model: $0.key, cost: $0.value) }
             .sorted { $0.cost > $1.cost }
 
-        // Use calendar span (first session → today) so daily avg and monthly
-        // projection reflect realistic cadence, not just active-usage days.
-        // Active days alone inflate the projection when Claude isn't used daily.
+        // Use calendar span (earliest known session → today) for daily avg and
+        // monthly projection. history.jsonl often predates project JSONLs, so
+        // use whichever source gives the earlier start date.
         let activeDays = max(stats.dailyActivity.count, 1)
         let spanDays: Int = {
             let df = DateFormatter()
             df.dateFormat = "yyyy-MM-dd"
             df.timeZone = .current
             let today = df.string(from: Date())
-            guard !stats.firstSessionDate.isEmpty,
-                  let first = df.date(from: stats.firstSessionDate),
+            // Pick the earliest date across stats and history sources
+            let candidates = [stats.firstSessionDate, historyFirstDate]
+                .compactMap { $0 }.filter { !$0.isEmpty }
+            guard let earliestStr = candidates.min(),
+                  let first = df.date(from: earliestStr),
                   let last = df.date(from: today) else { return activeDays }
             let span = Calendar.current.dateComponents([.day], from: first, to: last).day ?? 0
-            return max(span + 1, activeDays) // never less than active-day count
+            return max(span + 1, activeDays)
         }()
         let daily = totalCost / Double(spanDays)
         let monthly = daily * 30

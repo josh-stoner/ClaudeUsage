@@ -442,9 +442,13 @@ struct UsagePopover: View {
     private var patternsView: some View {
         VStack(spacing: 12) {
             if let stats = viewModel.stats {
-                // Tracking period
-                if let first = stats.dailyActivity.first?.date,
-                   let last = stats.dailyActivity.last?.date {
+                // Tracking period — use the earliest date across project JSONLs
+                // and history.jsonl so the range reflects full known history.
+                let historyFirst = viewModel.dailyHoursMap.keys.min()
+                let statsFirst = stats.dailyActivity.first?.date
+                let displayFirst = [historyFirst, statsFirst].compactMap { $0 }.min()
+                let statsLast = stats.dailyActivity.last?.date
+                if let first = displayFirst, let last = statsLast {
                     HStack(spacing: 4) {
                         Image(systemName: "calendar")
                             .font(.system(size: 10))
@@ -452,7 +456,7 @@ struct UsagePopover: View {
                         Text("\(formatShortDate(first)) – \(formatShortDate(last))")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(Theme.textSecondary)
-                        Text("(\(stats.dailyActivity.count) days)")
+                        Text("(\(calendarSpan(from: first)) days)")
                             .font(.system(size: 11))
                             .foregroundStyle(Theme.textFaint)
                     }
@@ -599,6 +603,15 @@ struct UsagePopover: View {
                 emptyPlaceholder("No pattern data")
             }
         }
+    }
+
+    private func calendarSpan(from firstDateStr: String) -> Int {
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.timeZone = .current
+        guard let first = df.date(from: firstDateStr),
+              let today = df.date(from: df.string(from: Date())) else { return 1 }
+        return max((Calendar.current.dateComponents([.day], from: first, to: today).day ?? 0) + 1, 1)
     }
 
     private func hourLabel(_ h: Int) -> String {
