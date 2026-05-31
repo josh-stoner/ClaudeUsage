@@ -631,7 +631,7 @@ struct UsagePopover: View {
 
         return order.map { wd in
             let vals = buckets[wd] ?? [0]
-            return DayAvg(day: names[wd]!, avg: vals.reduce(0, +) / max(vals.count, 1))
+            return DayAvg(day: names[wd] ?? "?", avg: vals.reduce(0, +) / max(vals.count, 1))
         }
     }
 
@@ -646,13 +646,14 @@ struct UsagePopover: View {
             }
             Spacer()
             Button(action: { viewModel.exportData() }) {
-                Image(systemName: "square.and.arrow.up")
+                exportButtonIcon
                     .font(.system(size: 11))
-                    .foregroundStyle(Theme.textMuted)
                     .frame(width: 28, height: 28)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.borderless)
+            .disabled(viewModel.exportState != .idle)
+            .animation(.easeInOut(duration: 0.2), value: viewModel.exportState)
             Button("Quit") {
                 NSApplication.shared.terminate(nil)
             }
@@ -662,6 +663,27 @@ struct UsagePopover: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
+    }
+
+    @ViewBuilder
+    private var exportButtonIcon: some View {
+        switch viewModel.exportState {
+        case .idle:
+            Image(systemName: "square.and.arrow.up")
+                .foregroundStyle(Theme.textMuted)
+        case .exporting:
+            ProgressView()
+                .controlSize(.mini)
+                .scaleEffect(0.8)
+        case .success:
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(Theme.green)
+                .transition(.opacity)
+        case .failed:
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(Theme.coral)
+                .transition(.opacity)
+        }
     }
 
     // MARK: - Components

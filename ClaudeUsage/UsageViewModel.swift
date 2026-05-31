@@ -18,6 +18,11 @@ final class UsageViewModel: ObservableObject {
         case idle, refreshing, done, failed
     }
 
+    enum ExportState: Sendable {
+        case idle, exporting, success, failed
+    }
+    @Published var exportState: ExportState = .idle
+
     // Local stats
     @Published var stats: StatsCache?
     @Published var todayActivity: DailyActivity?
@@ -38,6 +43,10 @@ final class UsageViewModel: ObservableObject {
     private var apiTimer: AnyCancellable?
     private var statsTimer: AnyCancellable?
     private let statsComputer = StatsComputer()
+
+    // Token cache — avoid repeated keychain reads across polls
+    private var cachedToken: String?
+    private var cachedTokenExpiresAt: Int64 = 0
 
     private let apiURL = "https://api.anthropic.com/api/oauth/usage"
     private var pollInterval: TimeInterval = 300 // poll every 5 min
@@ -108,7 +117,7 @@ final class UsageViewModel: ObservableObject {
         }
 
         guard let token = readOAuthToken() else {
-            apiError = "No OAuth token found"
+            apiError = "Grant keychain access in the dialog, or re-authenticate Claude Code"
             logger.error("No OAuth token found in keychain")
             if force {
                 refreshState = .failed
@@ -127,7 +136,11 @@ final class UsageViewModel: ObservableObject {
 
             var resultState: RefreshState = .done
             do {
-                var request = URLRequest(url: URL(string: apiURL)!)
+                guard let endpoint = URL(string: apiURL) else {
+                    self.apiError = "Invalid API URL"
+                    return
+                }
+                var request = URLRequest(url: endpoint)
                 request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
                 request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
 
@@ -156,6 +169,8 @@ final class UsageViewModel: ObservableObject {
                 }
 
                 if http.statusCode == 401 {
+                    self.cachedToken = nil  // force keychain re-read next poll
+                    self.cachedTokenExpiresAt = 0
                     self.apiError = "Token expired — re-auth Claude Code"
                     resultState = .failed
                     if force { await finishRefresh(resultState, startedAt: startTime) }
@@ -214,7 +229,16 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Keychain
 
-    private func readOAuthToken() -> String? {
+    private func readOAuthToken(force: Bool = false) -> String? {
+        // Return cached token if it won't expire for at least 60 s.
+        // This cuts cross-app keychain reads from every 5 min to ~once per
+        // token lifetime, so "Always Allow" isn't re-evaluated as often.
+        let nowMs = Int64(Date.now.timeIntervalSince1970 * 1000)
+        if !force, let token = cachedToken, cachedTokenExpiresAt - nowMs > 60_000 {
+            logger.info("Keychain read skipped — using cached token (expires in \((self.cachedTokenExpiresAt - nowMs) / 1000)s)")
+            return token
+        }
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
@@ -235,6 +259,9 @@ final class UsageViewModel: ObservableObject {
             return nil
         }
 
+        // Update in-memory cache
+        cachedToken = creds.claudeAiOauth.accessToken
+        cachedTokenExpiresAt = creds.claudeAiOauth.expiresAt
         return creds.claudeAiOauth.accessToken
     }
 
@@ -264,7 +291,7 @@ final class UsageViewModel: ObservableObject {
         let calendar = Calendar.current
         let weekday = calendar.component(.weekday, from: today)
         let daysFromMonday = (weekday + 5) % 7
-        let monday = calendar.date(byAdding: .day, value: -daysFromMonday, to: today)!
+        let monday = calendar.date(byAdding: .day, value: -daysFromMonday, to: today) ?? today
         let mondayStr = Self.dateString(from: monday)
 
         self.stats = decoded
@@ -309,7 +336,9 @@ final class UsageViewModel: ObservableObject {
         let fallback = ModelPrice(input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75)
 
         var totalCost = 0.0
-        var modelCosts: [(String, Double)] = []
+        // Aggregate by display family ("Opus"/"Sonnet"/"Haiku") to prevent
+        // duplicate keys when multiple model versions map to the same short name.
+        var costByFamily: [String: Double] = [:]
 
         for (model, usage) in stats.modelUsage {
             let p = prices[model] ?? fallback
@@ -318,9 +347,11 @@ final class UsageViewModel: ObservableObject {
                 + Double(usage.cacheReadInputTokens) / 1e6 * p.cacheRead
                 + Double(usage.cacheCreationInputTokens) / 1e6 * p.cacheCreate
             totalCost += cost
-            modelCosts.append((Self.shortModel(model), cost))
+            costByFamily[Self.shortModel(model), default: 0] += cost
         }
-        modelCosts.sort { $0.1 > $1.1 }
+        let modelCosts = costByFamily
+            .map { (model: $0.key, cost: $0.value) }
+            .sorted { $0.cost > $1.cost }
 
         let days = max(stats.dailyActivity.count, 1)
         let daily = totalCost / Double(days)
@@ -401,72 +432,85 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Export
 
     func exportData() {
-        var export: [String: Any] = [:]
-        export["exportedAt"] = ISO8601DateFormatter().string(from: .now)
+        guard exportState == .idle else { return }
+        exportState = .exporting
 
-        // API usage
-        if let u = usage {
-            var api: [String: Any] = [:]
-            if let s = u.fiveHour { api["fiveHour"] = ["utilization": s.utilization, "resetsAt": s.resetsAt ?? ""] }
-            if let s = u.sevenDay { api["sevenDay"] = ["utilization": s.utilization, "resetsAt": s.resetsAt ?? ""] }
-            if let s = u.sevenDayOpus { api["sevenDayOpus"] = ["utilization": s.utilization, "resetsAt": s.resetsAt ?? ""] }
-            if let s = u.sevenDaySonnet { api["sevenDaySonnet"] = ["utilization": s.utilization, "resetsAt": s.resetsAt ?? ""] }
-            if let s = u.sevenDayCowork { api["sevenDayCowork"] = ["utilization": s.utilization, "resetsAt": s.resetsAt ?? ""] }
-            export["apiUsage"] = api
-        }
+        // Build the Encodable payload on the main actor, then encode+write off-thread.
+        // Using Codable instead of [String: Any] + JSONSerialization eliminates the
+        // Obj-C NSInvalidArgumentException that try? cannot catch.
+        let payload = buildExportPayload()
 
-        // Local stats
-        if let s = stats {
-            export["totalSessions"] = s.totalSessions
-            export["totalMessages"] = s.totalMessages
-            export["firstSessionDate"] = s.firstSessionDate
-            export["dailyActivity"] = s.dailyActivity.map {
-                ["date": $0.date, "messages": $0.messageCount, "sessions": $0.sessionCount, "toolCalls": $0.toolCallCount]
+        Task.detached(priority: .utility) { [weak self] in
+            do {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                let data = try encoder.encode(payload)
+
+                let dateStr = UsageViewModel.dateString(from: .now)
+                let url = FileManager.default.homeDirectoryForCurrentUser
+                    .appendingPathComponent("Desktop")
+                    .appendingPathComponent("claude-usage-export-\(dateStr).json")
+                try data.write(to: url, options: .atomic)
+
+                await MainActor.run {
+                    NSWorkspace.shared.activateFileViewerSelecting([url])
+                    self?.exportState = .success
+                }
+            } catch {
+                await MainActor.run { self?.exportState = .failed }
             }
-            export["modelUsage"] = s.modelUsage.mapValues {
-                ["input": $0.inputTokens, "output": $0.outputTokens,
-                 "cacheRead": $0.cacheReadInputTokens, "cacheCreate": $0.cacheCreationInputTokens]
+
+            try? await Task.sleep(for: .seconds(2.0))
+            await MainActor.run { self?.exportState = .idle }
+        }
+    }
+
+    private func buildExportPayload() -> ExportPayload {
+        ExportPayload(
+            exportedAt: ISO8601DateFormatter().string(from: .now),
+            apiUsage: usage.map { u in
+                ExportAPIUsage(
+                    fiveHour: u.fiveHour.map { ExportAPIBucket(utilization: $0.utilization, resetsAt: $0.resetsAt ?? "") },
+                    sevenDay: u.sevenDay.map { ExportAPIBucket(utilization: $0.utilization, resetsAt: $0.resetsAt ?? "") },
+                    sevenDayOpus: u.sevenDayOpus.map { ExportAPIBucket(utilization: $0.utilization, resetsAt: $0.resetsAt ?? "") },
+                    sevenDaySonnet: u.sevenDaySonnet.map { ExportAPIBucket(utilization: $0.utilization, resetsAt: $0.resetsAt ?? "") },
+                    sevenDayCowork: u.sevenDayCowork.map { ExportAPIBucket(utilization: $0.utilization, resetsAt: $0.resetsAt ?? "") }
+                )
+            },
+            totalSessions: stats?.totalSessions,
+            totalMessages: stats?.totalMessages,
+            firstSessionDate: stats?.firstSessionDate,
+            dailyActivity: stats?.dailyActivity.map {
+                ExportDailyActivity(date: $0.date, messages: $0.messageCount, sessions: $0.sessionCount, toolCalls: $0.toolCallCount)
+            },
+            modelUsage: stats?.modelUsage.mapValues {
+                ExportModelUsage(input: $0.inputTokens, output: $0.outputTokens,
+                                 cacheRead: $0.cacheReadInputTokens, cacheCreate: $0.cacheCreationInputTokens)
+            },
+            hourCounts: stats?.hourCounts,
+            cost: costAnalysis.map { c in
+                ExportCost(
+                    totalAPICost: c.totalAPICost,
+                    dailyAvgCost: c.dailyAvgCost,
+                    monthlyProjection: c.monthlyProjection,
+                    roi: c.roi,
+                    daysTracked: c.daysTracked,
+                    // modelCosts is already deduplicated by family in computeCost()
+                    byModel: Dictionary(c.modelCosts.map { ($0.model, $0.cost) },
+                                        uniquingKeysWith: { a, _ in a })
+                )
+            },
+            dailyHours: dailyHoursMap.isEmpty ? nil : dailyHoursMap.mapValues { round($0 * 100) / 100 },
+            usageHoursSummary: usageHours.map {
+                ExportUsageHours(
+                    totalHours: round($0.totalHours * 10) / 10,
+                    thisWeekHours: round($0.thisWeekHours * 10) / 10,
+                    todayHours: round($0.todayHours * 10) / 10,
+                    avgDailyHours: round($0.avgDailyHours * 10) / 10,
+                    daysActive: $0.daysActive
+                )
             }
-            export["hourCounts"] = s.hourCounts
-        }
-
-        // Cost analysis
-        if let c = costAnalysis {
-            export["cost"] = [
-                "totalAPICost": c.totalAPICost,
-                "dailyAvgCost": c.dailyAvgCost,
-                "monthlyProjection": c.monthlyProjection,
-                "roi": c.roi,
-                "daysTracked": c.daysTracked,
-                "byModel": Dictionary(uniqueKeysWithValues: c.modelCosts.map { ($0.model, $0.cost) })
-            ] as [String: Any]
-        }
-
-        // Usage hours
-        if !dailyHoursMap.isEmpty {
-            export["dailyHours"] = dailyHoursMap.mapValues { round($0 * 100) / 100 }
-        }
-        if let uh = usageHours {
-            export["usageHoursSummary"] = [
-                "totalHours": round(uh.totalHours * 10) / 10,
-                "thisWeekHours": round(uh.thisWeekHours * 10) / 10,
-                "todayHours": round(uh.todayHours * 10) / 10,
-                "avgDailyHours": round(uh.avgDailyHours * 10) / 10,
-                "daysActive": uh.daysActive
-            ] as [String: Any]
-        }
-
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: export, options: [.prettyPrinted, .sortedKeys]) else { return }
-
-        let desktop = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Desktop")
-        let filename = "claude-usage-export-\(Self.dateString(from: .now)).json"
-        let url = desktop.appendingPathComponent(filename)
-        do {
-            try jsonData.write(to: url)
-            NSWorkspace.shared.activateFileViewerSelecting([url])
-        } catch {
-            // Silently fail — file write error
-        }
+        )
     }
 
     // MARK: - Helpers

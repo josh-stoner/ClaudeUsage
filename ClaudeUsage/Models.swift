@@ -153,6 +153,66 @@ struct UsageHours {
     let daysActive: Int
 }
 
+// MARK: - Export Payload (Encodable structs — no JSONSerialization, no Optional-wrapping hazard)
+
+struct ExportAPIBucket: Encodable {
+    let utilization: Double
+    let resetsAt: String
+}
+
+struct ExportAPIUsage: Encodable {
+    let fiveHour: ExportAPIBucket?
+    let sevenDay: ExportAPIBucket?
+    let sevenDayOpus: ExportAPIBucket?
+    let sevenDaySonnet: ExportAPIBucket?
+    let sevenDayCowork: ExportAPIBucket?
+}
+
+struct ExportDailyActivity: Encodable {
+    let date: String
+    let messages: Int
+    let sessions: Int
+    let toolCalls: Int
+}
+
+struct ExportModelUsage: Encodable {
+    let input: Int
+    let output: Int
+    let cacheRead: Int
+    let cacheCreate: Int
+}
+
+struct ExportCost: Encodable {
+    let totalAPICost: Double
+    let dailyAvgCost: Double
+    let monthlyProjection: Double
+    let roi: Double
+    let daysTracked: Int
+    let byModel: [String: Double]
+}
+
+struct ExportUsageHours: Encodable {
+    let totalHours: Double
+    let thisWeekHours: Double
+    let todayHours: Double
+    let avgDailyHours: Double
+    let daysActive: Int
+}
+
+struct ExportPayload: Encodable {
+    let exportedAt: String
+    let apiUsage: ExportAPIUsage?
+    let totalSessions: Int?
+    let totalMessages: Int?
+    let firstSessionDate: String?
+    let dailyActivity: [ExportDailyActivity]?
+    let modelUsage: [String: ExportModelUsage]?
+    let hourCounts: [String: Int]?
+    let cost: ExportCost?
+    let dailyHours: [String: Double]?
+    let usageHoursSummary: ExportUsageHours?
+}
+
 struct WeeklySummary {
     let weekStart: String
     let days: [DailyActivity]
