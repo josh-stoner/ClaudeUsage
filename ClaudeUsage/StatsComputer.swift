@@ -119,8 +119,9 @@ actor StatsComputer {
                     }
 
                     // Count tokens
-                    // Skip Claude Code's <synthetic> and other <…> pseudo-models
-                    if let model = msg["model"] as? String, !model.isEmpty, !model.hasPrefix("<"),
+                    // Only count real Claude models — skip <synthetic> pseudo-models
+                    // and third-party image models (recraft, flux, dalle-3, etc.)
+                    if let model = msg["model"] as? String, model.hasPrefix("claude-"),
                        let usage = msg["usage"] as? [String: Any] {
                         let inp = usage["input_tokens"] as? Int ?? 0
                         let out = usage["output_tokens"] as? Int ?? 0

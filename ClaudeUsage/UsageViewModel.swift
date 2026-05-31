@@ -229,12 +229,12 @@ final class UsageViewModel: ObservableObject {
 
     // MARK: - Keychain
 
-    private func readOAuthToken(force: Bool = false) -> String? {
+    private func readOAuthToken() -> String? {
         // Return cached token if it won't expire for at least 60 s.
         // This cuts cross-app keychain reads from every 5 min to ~once per
         // token lifetime, so "Always Allow" isn't re-evaluated as often.
         let nowMs = Int64(Date.now.timeIntervalSince1970 * 1000)
-        if !force, let token = cachedToken, cachedTokenExpiresAt - nowMs > 60_000 {
+        if let token = cachedToken, cachedTokenExpiresAt - nowMs > 60_000 {
             logger.info("Keychain read skipped — using cached token (expires in \((self.cachedTokenExpiresAt - nowMs) / 1000)s)")
             return token
         }
@@ -323,31 +323,35 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func computeCost(from stats: StatsCache) -> CostAnalysis {
-        // API pricing per million tokens
+        // API pricing per million tokens, keyed by display family so any
+        // future model version (e.g. claude-opus-4-8, claude-opus-4-9…)
+        // is automatically priced correctly via shortModel() family matching.
         struct ModelPrice {
             let input: Double; let output: Double
             let cacheRead: Double; let cacheCreate: Double
         }
-        let prices: [String: ModelPrice] = [
-            "claude-opus-4-6": ModelPrice(input: 15, output: 75, cacheRead: 1.5, cacheCreate: 18.75),
-            "claude-sonnet-4-6": ModelPrice(input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75),
-            "claude-haiku-4-5-20251001": ModelPrice(input: 0.8, output: 4, cacheRead: 0.08, cacheCreate: 1.0),
+        let familyPrices: [String: ModelPrice] = [
+            "Opus":   ModelPrice(input: 15,  output: 75,  cacheRead: 1.5,  cacheCreate: 18.75),
+            "Sonnet": ModelPrice(input: 3,   output: 15,  cacheRead: 0.3,  cacheCreate: 3.75),
+            "Haiku":  ModelPrice(input: 0.8, output: 4,   cacheRead: 0.08, cacheCreate: 1.0),
         ]
-        let fallback = ModelPrice(input: 3, output: 15, cacheRead: 0.3, cacheCreate: 3.75)
 
         var totalCost = 0.0
-        // Aggregate by display family ("Opus"/"Sonnet"/"Haiku") to prevent
-        // duplicate keys when multiple model versions map to the same short name.
+        // Aggregate by display family — deduplicates multi-version histories
+        // and excludes third-party/image models (recraft, flux, dalle-3, etc.)
         var costByFamily: [String: Double] = [:]
 
         for (model, usage) in stats.modelUsage {
-            let p = prices[model] ?? fallback
+            let family = Self.shortModel(model)
+            // Skip non-Claude models — only the three known families have pricing
+            guard familyPrices[family] != nil else { continue }
+            let p = familyPrices[family]!
             let cost = Double(usage.inputTokens) / 1e6 * p.input
                 + Double(usage.outputTokens) / 1e6 * p.output
                 + Double(usage.cacheReadInputTokens) / 1e6 * p.cacheRead
                 + Double(usage.cacheCreationInputTokens) / 1e6 * p.cacheCreate
             totalCost += cost
-            costByFamily[Self.shortModel(model), default: 0] += cost
+            costByFamily[family, default: 0] += cost
         }
         let modelCosts = costByFamily
             .map { (model: $0.key, cost: $0.value) }
@@ -394,6 +398,7 @@ final class UsageViewModel: ObservableObject {
 
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
+        dateFormatter.timeZone = .current  // match StatsComputer — ensure buckets align
 
         for (_, timestamps) in sessions {
             let sorted = timestamps.sorted()

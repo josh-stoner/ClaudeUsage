@@ -364,7 +364,7 @@ struct UsagePopover: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(Theme.textFaint)
                             .tracking(0.8)
-                        infoTip("Includes input, output, cache read, and cache creation tokens at published API rates.")
+                        infoTip("Priced by model family (Opus/Sonnet/Haiku) at published API rates. Includes input, output, cache read, and cache creation tokens.")
                         Spacer()
                     }
                         .padding(.horizontal, 16)

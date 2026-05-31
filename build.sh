@@ -6,6 +6,19 @@
 # "Always Allow" grants persist across rebuilds.
 set -euo pipefail
 
+# --- Parse args ---
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --identity)
+            SIGN_IDENTITY="${2:?'--identity requires a value'}"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2; exit 1
+            ;;
+    esac
+done
+
 PROJ_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_NAME="ClaudeUsage"
 BUNDLE_ID="com.stoneros.claude-usage"
@@ -13,7 +26,7 @@ STAGED="$PROJ_DIR/.staged/$APP_NAME.app"
 INSTALLED="/Applications/$APP_NAME.app"
 LAUNCHAGENT="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
 SOURCE_PLIST="$PROJ_DIR/$APP_NAME/Info.plist"
-ICON_SRC="$PROJ_DIR/build/$APP_NAME.app/Contents/Resources/AppIcon.icns"
+ICON_SRC="$PROJ_DIR/icon/AppIcon.icns"
 
 # --- Identity selection ---
 if [ -z "${SIGN_IDENTITY:-}" ]; then
