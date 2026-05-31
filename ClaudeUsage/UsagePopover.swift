@@ -338,9 +338,9 @@ struct UsagePopover: View {
                     costRow("Total spent", "$\(formatCost(cost.totalAPICost))",
                             tip: "Token counts from stats-cache.json (last updated by Claude Code)")
                     costRow("Daily avg", "$\(formatCost(cost.dailyAvgCost))",
-                            tip: "Total ÷ \(cost.daysTracked) active days")
+                            tip: "Total ÷ \(cost.daysTracked) calendar days (first session to today)")
                     costRow("Monthly proj", "$\(formatCost(cost.monthlyProjection))",
-                            tip: "Daily avg × 30. Assumes consistent usage.")
+                            tip: "Daily avg × 30. Based on calendar span, not just active days.")
                 }
 
                 // Plan comparison

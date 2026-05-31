@@ -357,8 +357,22 @@ final class UsageViewModel: ObservableObject {
             .map { (model: $0.key, cost: $0.value) }
             .sorted { $0.cost > $1.cost }
 
-        let days = max(stats.dailyActivity.count, 1)
-        let daily = totalCost / Double(days)
+        // Use calendar span (first session → today) so daily avg and monthly
+        // projection reflect realistic cadence, not just active-usage days.
+        // Active days alone inflate the projection when Claude isn't used daily.
+        let activeDays = max(stats.dailyActivity.count, 1)
+        let spanDays: Int = {
+            let df = DateFormatter()
+            df.dateFormat = "yyyy-MM-dd"
+            df.timeZone = .current
+            let today = df.string(from: Date())
+            guard !stats.firstSessionDate.isEmpty,
+                  let first = df.date(from: stats.firstSessionDate),
+                  let last = df.date(from: today) else { return activeDays }
+            let span = Calendar.current.dateComponents([.day], from: first, to: last).day ?? 0
+            return max(span + 1, activeDays) // never less than active-day count
+        }()
+        let daily = totalCost / Double(spanDays)
         let monthly = daily * 30
         let planCost = 100.0 // Max 5x
 
@@ -367,7 +381,7 @@ final class UsageViewModel: ObservableObject {
             dailyAvgCost: daily,
             monthlyProjection: monthly,
             modelCosts: modelCosts,
-            daysTracked: days,
+            daysTracked: spanDays,
             planCost: planCost,
             roi: monthly / planCost
         )
