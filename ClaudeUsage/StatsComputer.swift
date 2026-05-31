@@ -119,7 +119,8 @@ actor StatsComputer {
                     }
 
                     // Count tokens
-                    if let model = msg["model"] as? String, !model.isEmpty,
+                    // Skip Claude Code's <synthetic> and other <…> pseudo-models
+                    if let model = msg["model"] as? String, !model.isEmpty, !model.hasPrefix("<"),
                        let usage = msg["usage"] as? [String: Any] {
                         let inp = usage["input_tokens"] as? Int ?? 0
                         let out = usage["output_tokens"] as? Int ?? 0
