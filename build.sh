@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # build.sh — deterministic build, sign, and install for ClaudeUsage
-# Usage: ./build.sh [--identity "Your Cert Name"]
+# Usage: ./build.sh [--identity "Your Cert Name"] [--notarize]
 #
 # Signs with the SAME identity on every run so macOS keychain ACL
 # "Always Allow" grants persist across rebuilds.
+#
+# --notarize  Submit to Apple notarization after signing and staple the ticket.
+#             Requires: xcrun notarytool store-credentials "claudeusage-notary"
+#                       (one-time setup — see NOTARIZE.md or run without flag for local builds)
 set -euo pipefail
+
+NOTARIZE=false
 
 # --- Parse args ---
 while [[ $# -gt 0 ]]; do
@@ -12,6 +18,10 @@ while [[ $# -gt 0 ]]; do
         --identity)
             SIGN_IDENTITY="${2:?'--identity requires a value'}"
             shift 2
+            ;;
+        --notarize)
+            NOTARIZE=true
+            shift
             ;;
         *)
             echo "Unknown argument: $1" >&2; exit 1
@@ -25,6 +35,7 @@ BUNDLE_ID="com.stoneros.claude-usage"
 STAGED="$PROJ_DIR/.staged/$APP_NAME.app"
 INSTALLED="/Applications/$APP_NAME.app"
 LAUNCHAGENT="$HOME/Library/LaunchAgents/$BUNDLE_ID.plist"
+LAUNCHAGENT_SRC="$PROJ_DIR/LaunchAgent/$BUNDLE_ID.plist"
 SOURCE_PLIST="$PROJ_DIR/$APP_NAME/Info.plist"
 ICON_SRC="$PROJ_DIR/icon/AppIcon.icns"
 
@@ -77,6 +88,7 @@ echo "⟳  Signing…"
 codesign --force --deep \
     --sign "$SIGN_IDENTITY" \
     --identifier "$BUNDLE_ID" \
+    --requirements "$PROJ_DIR/devid.req" \
     --options runtime \
     "$STAGED"
 
@@ -85,31 +97,58 @@ codesign --verify --deep --strict "$STAGED" 2>&1 \
     && echo "   ✓ Signature valid" \
     || { echo "❌  Codesign verification failed"; exit 1; }
 
+# --- 3b. Notarize (opt-in) ---
+if [ "$NOTARIZE" = true ]; then
+    echo "⟳  Notarizing…"
+    ZIP="$PROJ_DIR/.staged/${APP_NAME}.zip"
+    ditto -c -k --keepParent "$STAGED" "$ZIP"
+    xcrun notarytool submit "$ZIP" \
+        --keychain-profile "claudeusage-notary" \
+        --wait
+    echo "⟳  Stapling notarization ticket…"
+    xcrun stapler staple "$STAGED"
+    echo "   ✓ Notarization complete"
+    rm -f "$ZIP"
+fi
+
 # --- 4. Install ---
 echo "⟳  Installing to /Applications…"
 if [ -d "$INSTALLED" ]; then
-    # Stop the running instance before replacing the binary
     pkill -x "$APP_NAME" 2>/dev/null || true
     sleep 0.5
     rm -rf "$INSTALLED"
 fi
 cp -R "$STAGED" "$INSTALLED"
 
-# --- 5. Launch / reload LaunchAgent ---
-if [ -f "$LAUNCHAGENT" ]; then
-    echo "⟳  Reloading LaunchAgent…"
+# --- 5. Install versioned LaunchAgent from repo ---
+if [ -f "$LAUNCHAGENT_SRC" ]; then
+    echo "⟳  Installing LaunchAgent…"
+    # Unload existing agent (ignore error if not loaded)
     launchctl unload "$LAUNCHAGENT" 2>/dev/null || true
+    cp "$LAUNCHAGENT_SRC" "$LAUNCHAGENT"
     sleep 0.3
     launchctl load "$LAUNCHAGENT"
+    echo "   ✓ LaunchAgent loaded"
 else
-    echo "⚠   LaunchAgent not found at $LAUNCHAGENT"
-    echo "    Starting app directly…"
-    open "$INSTALLED"
+    echo "⚠   No versioned plist at $LAUNCHAGENT_SRC"
+    if [ -f "$LAUNCHAGENT" ]; then
+        echo "⟳  Reloading existing LaunchAgent…"
+        launchctl unload "$LAUNCHAGENT" 2>/dev/null || true
+        sleep 0.3
+        launchctl load "$LAUNCHAGENT"
+    else
+        echo "    Starting app directly…"
+        open "$INSTALLED"
+    fi
 fi
 
 echo ""
-echo "✓  ClaudeUsage v1.1 installed."
+if [ "$NOTARIZE" = true ]; then
+    echo "✓  ClaudeUsage installed and notarized."
+    echo "   Verify: spctl -a -vvv -t install \"$INSTALLED\""
+else
+    echo "✓  ClaudeUsage v1.2 installed."
+fi
 echo ""
 echo "  → If macOS shows a keychain dialog, click 'Always Allow'."
 echo "    With a consistent signing identity, this grant now persists permanently."
-echo "    (If you still see repeated prompts, export SIGN_IDENTITY='...' to pin the cert.)"

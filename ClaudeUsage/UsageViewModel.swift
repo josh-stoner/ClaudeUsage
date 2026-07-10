@@ -2,6 +2,8 @@ import Foundation
 import AppKit
 import Combine
 import Security
+import SwiftUI
+import UserNotifications
 import os.log
 
 private let logger = Logger(subsystem: "com.stoneros.claude-usage", category: "api")
@@ -31,6 +33,9 @@ final class UsageViewModel: ObservableObject {
     @Published var costAnalysis: CostAnalysis?
     @Published var dailyHoursMap: [String: Double] = [:]  // "yyyy-MM-dd" -> hours
 
+    // Utilization time-series (Stream 2)
+    @Published var usageHistory: [UsageSnapshot] = []
+
     @Published var selectedTab: Tab = .limits
 
     enum Tab: String, CaseIterable, Sendable {
@@ -38,18 +43,23 @@ final class UsageViewModel: ObservableObject {
         case week = "Week"
         case cost = "Cost"
         case patterns = "When"
+        case trends = "Trends"
     }
 
     private var apiTimer: AnyCancellable?
     private var statsTimer: AnyCancellable?
     private let statsComputer = StatsComputer()
 
-    // Token cache — avoid repeated keychain reads across polls
+    // Token cache (in-memory) — tier 1 of the 3-tier read in readOAuthToken()
     private var cachedToken: String?
     private var cachedTokenExpiresAt: Int64 = 0
 
+    // Notification tracking — keyed by "threshold_resetsAt" to avoid re-firing per window
+    private var notifiedThresholds: Set<String> = []
+
     private let apiURL = "https://api.anthropic.com/api/oauth/usage"
-    private var pollInterval: TimeInterval = 300 // poll every 5 min
+    // Effective poll interval — starts at user preference, doubles on 429, resets on 200
+    private var pollInterval: TimeInterval
     private var backoffUntil: Date?
 
     private var cacheURL: URL {
@@ -58,13 +68,33 @@ final class UsageViewModel: ObservableObject {
         return dir.appendingPathComponent("usage-cache.json")
     }
 
+    // MARK: - Configurable thresholds (read from UserDefaults at call time)
+
+    private var alertThreshold1: Double {
+        let v = UserDefaults.standard.integer(forKey: "alertThreshold1")
+        return Double(v > 0 ? v : 80)
+    }
+
+    private var alertThreshold2: Double {
+        let v = UserDefaults.standard.integer(forKey: "alertThreshold2")
+        return Double(v > 0 ? v : 95)
+    }
+
+    private var basePollInterval: TimeInterval {
+        let mins = UserDefaults.standard.integer(forKey: "pollIntervalMinutes")
+        return TimeInterval(mins > 0 ? mins * 60 : 300)
+    }
+
     // MARK: - Menu bar display
 
-    var menuBarTitle: String {
-        if let u = usage?.fiveHour {
-            return "\(Int(u.utilization))%"
-        }
-        return "—"
+    /// Current 5-hour utilization as an integer percentage — nil before first successful fetch.
+    var fiveHourPercent: Int? {
+        usage?.fiveHour.map { Int($0.utilization) }
+    }
+
+    /// Compact countdown to next 5-hour reset, e.g. "3:12" or "48m" — nil when no reset date.
+    var fiveHourCountdown: String? {
+        usage?.fiveHour?.compactTimeUntilReset
     }
 
     var menuBarColor: MenuBarColor {
@@ -81,26 +111,29 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Init
 
     init() {
+        // Initialise poll interval from user preference (default 5 min)
+        let mins = UserDefaults.standard.integer(forKey: "pollIntervalMinutes")
+        pollInterval = TimeInterval(mins > 0 ? mins * 60 : 300)
+
+        usageHistory = UsageHistory.load()
         loadCachedUsage()
         fetchUsage()
         loadLocalStats()
 
-        // Poll API every 2 min (backs off on 429)
+        // Check every 30s; fire a fetch when pollInterval has elapsed
         apiTimer = Timer.publish(every: 30, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 Task { @MainActor in
                     guard let self else { return }
-                    // Check backoff
                     if let until = self.backoffUntil, Date.now < until { return }
-                    // Check poll interval
                     if let last = self.lastAPIRefresh,
                        Date.now.timeIntervalSince(last) < self.pollInterval { return }
                     self.fetchUsage()
                 }
             }
 
-        // Poll local stats every 60s (parses JSONL files, uses dir mod time to skip if unchanged)
+        // Poll local stats every 60s (parses JSONL files, skips if unchanged via dir mod-time)
         statsTimer = Timer.publish(every: 60, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
@@ -111,7 +144,6 @@ final class UsageViewModel: ObservableObject {
     // MARK: - API Usage
 
     func fetchUsage(force: Bool = false) {
-        // Respect backoff unless forced (manual refresh)
         if !force, let until = backoffUntil, Date.now < until {
             return
         }
@@ -157,7 +189,7 @@ final class UsageViewModel: ObservableObject {
                 if http.statusCode == 429 {
                     let retryAfter = http.value(forHTTPHeaderField: "retry-after")
                         .flatMap { Double($0) } ?? 300
-                    let wait = max(retryAfter, 60) // at least 1 min
+                    let wait = max(retryAfter, 60)
                     self.pollInterval = min(self.pollInterval * 2, 600)
                     self.backoffUntil = Date.now.addingTimeInterval(wait)
                     if self.usage == nil {
@@ -169,8 +201,9 @@ final class UsageViewModel: ObservableObject {
                 }
 
                 if http.statusCode == 401 {
-                    self.cachedToken = nil  // force keychain re-read next poll
+                    self.cachedToken = nil
                     self.cachedTokenExpiresAt = 0
+                    KeychainStore.clearOwn()
                     self.apiError = "Token expired — re-auth Claude Code"
                     resultState = .failed
                     if force { await finishRefresh(resultState, startedAt: startTime) }
@@ -189,9 +222,28 @@ final class UsageViewModel: ObservableObject {
                 self.usage = decoded
                 self.apiError = nil
                 self.lastAPIRefresh = .now
-                self.pollInterval = 300
+                self.pollInterval = self.basePollInterval  // reset backoff to user preference
                 self.backoffUntil = nil
+                self.checkThresholdNotifications()
                 try? data.write(to: self.cacheURL, options: .atomic)
+
+                // Stream 2: persist snapshot + refresh in-memory history
+                let snap = UsageSnapshot(
+                    ts: Int64(Date.now.timeIntervalSince1970 * 1000),
+                    buckets: {
+                        var b: [String: Double] = [:]
+                        if let v = decoded.fiveHour?.utilization         { b["fiveHour"] = v }
+                        if let v = decoded.sevenDay?.utilization          { b["sevenDay"] = v }
+                        if let v = decoded.sevenDayOpus?.utilization      { b["sevenDayOpus"] = v }
+                        if let v = decoded.sevenDaySonnet?.utilization    { b["sevenDaySonnet"] = v }
+                        if let v = decoded.sevenDayCowork?.utilization    { b["sevenDayCowork"] = v }
+                        if let v = decoded.sevenDayOauthApps?.utilization { b["sevenDayOauthApps"] = v }
+                        return b
+                    }()
+                )
+                UsageHistory.append(snap)
+                self.usageHistory = UsageHistory.load()
+
                 if force { await finishRefresh(.done, startedAt: startTime) }
             } catch {
                 logger.error("Fetch error: \(error)")
@@ -216,53 +268,158 @@ final class UsageViewModel: ObservableObject {
     // MARK: - Cache
 
     private func loadCachedUsage() {
-        guard let data = try? Data(contentsOf: cacheURL),
-              let decoded = try? JSONDecoder().decode(UsageResponse.self, from: data)
-        else { return }
+        guard let data = try? Data(contentsOf: cacheURL) else { return }
+        guard let decoded = try? JSONDecoder().decode(UsageResponse.self, from: data) else {
+            logger.debug("Cache decode failed — corrupt or schema mismatch at \(self.cacheURL.path)")
+            return
+        }
         self.usage = decoded
-        // Show cached timestamp from file modification date
         if let attrs = try? FileManager.default.attributesOfItem(atPath: cacheURL.path),
            let modDate = attrs[.modificationDate] as? Date {
             self.lastAPIRefresh = modDate
         }
     }
 
-    // MARK: - Keychain
+    // MARK: - Keychain (3-tier read)
+    //
+    // Tier 1 — in-memory cache: fastest, lost on process exit.
+    // Tier 2 — own keychain item (service com.stoneros.claude-usage): the app owns it,
+    //           so reads never prompt. Survives reboots (AfterFirstUnlock). Populated on
+    //           every successful foreign read; cleared on 401.
+    // Tier 3 — foreign item (Claude Code-credentials): the one-time "Always Allow" lives here.
+    //           Only reached when tiers 1 and 2 are empty or near-expired.
+    //
+    // Net effect: the "Always Allow" dialog appears at most once per OAuth token lifetime
+    // rather than once per process start, making the grant durable.
 
     private func readOAuthToken() -> String? {
-        // Return cached token if it won't expire for at least 60 s.
-        // This cuts cross-app keychain reads from every 5 min to ~once per
-        // token lifetime, so "Always Allow" isn't re-evaluated as often.
         let nowMs = Int64(Date.now.timeIntervalSince1970 * 1000)
+
+        // Tier 1: in-memory
         if let token = cachedToken, cachedTokenExpiresAt - nowMs > 60_000 {
-            logger.info("Keychain read skipped — using cached token (expires in \((self.cachedTokenExpiresAt - nowMs) / 1000)s)")
+            logger.info("Token: in-memory cache hit (expires in \((self.cachedTokenExpiresAt - nowMs) / 1000)s)")
             return token
         }
 
+        // Tier 2: own keychain item (no ACL prompt — we own it)
+        if let own = KeychainStore.readOwn(), own.expiresAt - nowMs > 60_000 {
+            logger.info("Token: own-keychain cache hit (expires in \((own.expiresAt - nowMs) / 1000)s)")
+            cachedToken = own.token
+            cachedTokenExpiresAt = own.expiresAt
+            return own.token
+        }
+
+        // Tier 3: foreign "Claude Code-credentials" item — ACL prompt if grant missing/changed
         let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
+            kSecClass       as String: kSecClassGenericPassword,
             kSecAttrService as String: "Claude Code-credentials",
             kSecAttrAccount as String: NSUserName(),
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecReturnData  as String: true,
+            kSecMatchLimit  as String: kSecMatchLimitOne
         ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        logger.info("Keychain read status: \(status) (0 = success)")
+        var raw: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &raw)
+        logger.info("Foreign keychain read: status \(status) (0 = success)")
 
         guard status == errSecSuccess,
-              let data = result as? Data,
+              let data = raw as? Data,
               let creds = try? JSONDecoder().decode(ClaudeCredentials.self, from: data)
         else {
-            logger.error("Keychain read failed: status=\(status), hasData=\(result != nil)")
+            logger.error("Foreign keychain read failed: status=\(status), hasData=\(raw != nil)")
             return nil
         }
 
-        // Update in-memory cache
-        cachedToken = creds.claudeAiOauth.accessToken
-        cachedTokenExpiresAt = creds.claudeAiOauth.expiresAt
-        return creds.claudeAiOauth.accessToken
+        let token = creds.claudeAiOauth.accessToken
+        let expiresAt = creds.claudeAiOauth.expiresAt
+        cachedToken = token
+        cachedTokenExpiresAt = expiresAt
+        KeychainStore.writeOwn(.init(token: token, expiresAt: expiresAt))
+        return token
+    }
+
+    // MARK: - Burn rate (Stream 2)
+
+    /// Projected cap-time for a utilization bucket, based on linear regression over points
+    /// since the last reset (detected as a utilization drop > 30 pct-points).
+    /// Returns nil when there are fewer than 2 in-window points or the slope is flat/falling.
+    func burnRate(for bucket: String) -> BurnRate? {
+        let pts = UsageHistory.series(for: bucket)
+        guard pts.count >= 2 else { return nil }
+
+        // Find the start of the current window — last big drop signals a reset
+        var windowStart = 0
+        for i in 1..<pts.count {
+            if pts[i - 1].utilization - pts[i].utilization > 30 {
+                windowStart = i
+            }
+        }
+        let window = Array(pts[windowStart...])
+        guard window.count >= 2 else { return nil }
+
+        // Ordinary least-squares slope (pct per millisecond)
+        let t0 = Double(window[0].ts)
+        let xs = window.map { Double($0.ts) - t0 }
+        let ys = window.map { $0.utilization }
+        let n = Double(window.count)
+        let sumX  = xs.reduce(0, +)
+        let sumY  = ys.reduce(0, +)
+        let sumXY = zip(xs, ys).map(*).reduce(0, +)
+        let sumX2 = xs.map { $0 * $0 }.reduce(0, +)
+        let denom = n * sumX2 - sumX * sumX
+        guard abs(denom) > 1e-9 else { return nil }
+        let slope = (n * sumXY - sumX * sumY) / denom
+
+        guard slope > 1e-10 else { return nil }  // flat or falling — won't cap
+
+        let lastU  = ys.last ?? 0
+        let lastTs = xs.last ?? 0
+        let msToCap = (100.0 - lastU) / slope
+        guard msToCap > 0 else { return nil }
+
+        let capAt = Date(timeIntervalSince1970: (t0 + lastTs + msToCap) / 1000)
+        return BurnRate(projectedCapAt: capAt)
+    }
+
+    /// Ordered (oldest → newest) utilization values for a bucket, sourced from the
+    /// in-memory history (avoids re-reading the file on every view render).
+    func utilizationSeries(for bucket: String) -> [Double] {
+        usageHistory.compactMap { $0.buckets[bucket] }
+    }
+
+    // MARK: - Notifications
+
+    func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error { logger.error("Notification permission error: \(error)") }
+            logger.info("Notification permission granted: \(granted)")
+        }
+    }
+
+    /// Fire threshold alerts if the 5-hour window crosses the configured thresholds and we
+    /// haven't already notified for this specific window (keyed by resetsAt timestamp).
+    private func checkThresholdNotifications() {
+        guard UserDefaults.standard.bool(forKey: "notificationsEnabled"),
+              let five = usage?.fiveHour else { return }
+        let windowKey = five.resetsAt ?? "static"
+        let pct = five.utilization
+        for threshold in [alertThreshold1, alertThreshold2] where pct >= threshold {
+            let key = "\(Int(threshold))_\(windowKey)"
+            guard !notifiedThresholds.contains(key) else { continue }
+            notifiedThresholds.insert(key)
+            sendUsageNotification(threshold: Int(threshold), pct: pct, resetStr: five.timeUntilReset)
+        }
+    }
+
+    private func sendUsageNotification(threshold: Int, pct: Double, resetStr: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "Claude Usage \(threshold)%"
+        content.body = "\(Int(pct))% of your 5-hour window used. \(resetStr)."
+        content.sound = .default
+        let id = "claudeusage_\(threshold)_\(Int(Date.now.timeIntervalSince1970))"
+        let req = UNNotificationRequest(identifier: id, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(req) { error in
+            if let error { logger.error("Notification send error: \(error)") }
+        }
     }
 
     // MARK: - Local Stats
@@ -297,11 +454,9 @@ final class UsageViewModel: ObservableObject {
         self.stats = decoded
         self.todayActivity = decoded.dailyActivity.first { $0.date == todayStr }
         self.currentWeek = buildWeekSummary(from: decoded, weekStart: mondayStr, weekEnd: todayStr)
-        // Compute hours first — history.jsonl often has an earlier start date than project JSONLs
         let (hours, hoursMap) = computeUsageHours(todayStr: todayStr, mondayStr: mondayStr)
         self.usageHours = hours
         self.dailyHoursMap = hoursMap
-        // Use earliest date across both sources for an accurate calendar span
         let historyFirstDate = hoursMap.keys.min()
         self.costAnalysis = computeCost(from: decoded, historyFirstDate: historyFirstDate)
     }
@@ -326,9 +481,6 @@ final class UsageViewModel: ObservableObject {
     }
 
     private func computeCost(from stats: StatsCache, historyFirstDate: String? = nil) -> CostAnalysis {
-        // API pricing per million tokens, keyed by display family so any
-        // future model version (e.g. claude-opus-4-8, claude-opus-4-9…)
-        // is automatically priced correctly via shortModel() family matching.
         struct ModelPrice {
             let input: Double; let output: Double
             let cacheRead: Double; let cacheCreate: Double
@@ -340,13 +492,10 @@ final class UsageViewModel: ObservableObject {
         ]
 
         var totalCost = 0.0
-        // Aggregate by display family — deduplicates multi-version histories
-        // and excludes third-party/image models (recraft, flux, dalle-3, etc.)
         var costByFamily: [String: Double] = [:]
 
         for (model, usage) in stats.modelUsage {
             let family = Self.shortModel(model)
-            // Skip non-Claude models — only the three known families have pricing
             guard familyPrices[family] != nil else { continue }
             let p = familyPrices[family]!
             let cost = Double(usage.inputTokens) / 1e6 * p.input
@@ -360,16 +509,12 @@ final class UsageViewModel: ObservableObject {
             .map { (model: $0.key, cost: $0.value) }
             .sorted { $0.cost > $1.cost }
 
-        // Use calendar span (earliest known session → today) for daily avg and
-        // monthly projection. history.jsonl often predates project JSONLs, so
-        // use whichever source gives the earlier start date.
         let activeDays = max(stats.dailyActivity.count, 1)
         let spanDays: Int = {
             let df = DateFormatter()
             df.dateFormat = "yyyy-MM-dd"
             df.timeZone = .current
             let today = df.string(from: Date())
-            // Pick the earliest date across stats and history sources
             let candidates = [stats.firstSessionDate, historyFirstDate]
                 .compactMap { $0 }.filter { !$0.isEmpty }
             guard let earliestStr = candidates.min(),
@@ -380,7 +525,7 @@ final class UsageViewModel: ObservableObject {
         }()
         let daily = totalCost / Double(spanDays)
         let monthly = daily * 30
-        let planCost = 100.0 // Max 5x
+        let planCost = 100.0
 
         return CostAnalysis(
             totalAPICost: totalCost,
@@ -397,7 +542,6 @@ final class UsageViewModel: ObservableObject {
         let historyPath = FileManager.default.homeDirectoryForCurrentUser.path + "/.claude/history.jsonl"
         guard let content = try? String(contentsOfFile: historyPath, encoding: .utf8) else { return (nil, [:]) }
 
-        // Parse sessions from history.jsonl
         struct HistoryEntry: Codable {
             let timestamp: Int64
             let sessionId: String?
@@ -412,26 +556,21 @@ final class UsageViewModel: ObservableObject {
             sessions[sid, default: []].append(entry.timestamp)
         }
 
-        // Calculate active time: sum gaps between messages that are < 10 min apart
-        let maxGap: Int64 = 600_000 // 10 min in ms
+        let maxGap: Int64 = 600_000
         var dailyMs: [String: Int64] = [:]
 
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "yyyy-MM-dd"
-        dateFormatter.timeZone = .current  // match StatsComputer — ensure buckets align
+        dateFormatter.timeZone = .current
 
         for (_, timestamps) in sessions {
             let sorted = timestamps.sorted()
             guard sorted.count >= 2 else { continue }
-
             let startDate = dateFormatter.string(from: Date(timeIntervalSince1970: Double(sorted[0]) / 1000))
-
             var activeMs: Int64 = 0
             for i in 1..<sorted.count {
                 let gap = sorted[i] - sorted[i - 1]
-                if gap <= maxGap {
-                    activeMs += gap
-                }
+                if gap <= maxGap { activeMs += gap }
             }
             dailyMs[startDate, default: 0] += activeMs
         }
@@ -439,10 +578,8 @@ final class UsageViewModel: ObservableObject {
         let totalMs = dailyMs.values.reduce(Int64(0), +)
         let totalHours = Double(totalMs) / 3_600_000
         let daysActive = dailyMs.count
-
         let weekMs = dailyMs.filter { $0.key >= mondayStr }.values.reduce(Int64(0), +)
         let todayMs = dailyMs[todayStr] ?? 0
-
         let hoursMap = dailyMs.mapValues { Double($0) / 3_600_000 }
 
         return (UsageHours(
@@ -460,9 +597,6 @@ final class UsageViewModel: ObservableObject {
         guard exportState == .idle else { return }
         exportState = .exporting
 
-        // Build the Encodable payload on the main actor, then encode+write off-thread.
-        // Using Codable instead of [String: Any] + JSONSerialization eliminates the
-        // Obj-C NSInvalidArgumentException that try? cannot catch.
         let payload = buildExportPayload()
 
         Task.detached(priority: .utility) { [weak self] in
@@ -520,7 +654,6 @@ final class UsageViewModel: ObservableObject {
                     monthlyProjection: c.monthlyProjection,
                     roi: c.roi,
                     daysTracked: c.daysTracked,
-                    // modelCosts is already deduplicated by family in computeCost()
                     byModel: Dictionary(c.modelCosts.map { ($0.model, $0.cost) },
                                         uniquingKeysWith: { a, _ in a })
                 )
@@ -552,5 +685,26 @@ final class UsageViewModel: ObservableObject {
         if name.contains("haiku") { return "Haiku" }
         return name
     }
+}
 
+// MARK: - Burn Rate
+
+struct BurnRate {
+    let projectedCapAt: Date
+
+    /// Human-readable caption for display in the 5-hour meter subtitle.
+    func caption(resetDate: Date?) -> String {
+        let now = Date.now
+        guard projectedCapAt > now else { return "at capacity" }
+
+        let interval = projectedCapAt.timeIntervalSince(now)
+        let hours = Int(interval) / 3600
+        let mins  = (Int(interval) % 3600) / 60
+        let timeStr = hours > 0 ? "\(hours)h \(mins)m" : "\(mins)m"
+
+        if let reset = resetDate, projectedCapAt < reset {
+            return "caps ~\(timeStr) from now"
+        }
+        return "won't cap this window"
+    }
 }

@@ -50,6 +50,19 @@ struct UsageBucket: Codable {
         return "Resets in \(minutes)m"
     }
 
+    /// Compact form for the menu-bar label: "3:12" (hours:mm) or "48m"
+    var compactTimeUntilReset: String? {
+        guard let date = resetDate else { return nil }
+        let interval = date.timeIntervalSince(.now)
+        guard interval > 0 else { return nil }
+        let hours = Int(interval) / 3600
+        let mins  = (Int(interval) % 3600) / 60
+        if hours > 0 {
+            return "\(hours):\(String(format: "%02d", mins))"
+        }
+        return "\(mins)m"
+    }
+
     var resetTimeFormatted: String {
         guard let date = resetDate else { return "" }
         let f = DateFormatter()

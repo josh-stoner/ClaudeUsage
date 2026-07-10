@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.stoneros.claude-usage</string>
+	<key>Program</key>
+	<string>/Applications/ClaudeUsage.app/Contents/MacOS/ClaudeUsage</string>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Relaunch on crash, but stay closed when the user quits -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>Crashed</key>
+		<true/>
+	</dict>
+</dict>
+</plist>
